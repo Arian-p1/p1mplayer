@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <!-- White rounded-square background -->
+  <rect x="0" y="0" width="256" height="256" rx="48" ry="48" fill="#ffffff"/>
+  <!-- "p1m" in the Gruvbox accent colors -->
+  <text x="128" y="146" text-anchor="middle"
+        font-family="Liberation Sans, DejaVu Sans, Arial, sans-serif"
+        font-weight="bold" font-size="100" letter-spacing="-2">
+    <tspan fill="#fe8019">p</tspan><tspan fill="#458588">1</tspan><tspan fill="#cc241d">m</tspan>
+  </text>
+</svg>

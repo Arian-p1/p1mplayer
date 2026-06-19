@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=p1mplayer
+GenericName=Music Player
+Comment=A minimal music player
+Exec=p1mplayer
+Icon=p1mplayer
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupWMClass=p1mplayer

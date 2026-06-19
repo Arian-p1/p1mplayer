@@ -17,6 +17,21 @@ use std::rc::Rc;
 use std::time::Duration;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // On Wayland the compositor/taskbar derives a window's icon from its application
+    // id (matched to an installed `p1mplayer.desktop` + themed icon), and ignores the
+    // in-window `icon` property; X11 uses WM_CLASS similarly. Set a stable app id so
+    // the right icon is picked up. (Linux/BSD only; a no-op elsewhere.)
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        use slint::winit_030::winit::platform::wayland::WindowAttributesExtWayland;
+        if let Err(e) = slint::BackendSelector::new()
+            .with_winit_window_attributes_hook(|attrs| attrs.with_name("p1mplayer", "p1mplayer"))
+            .select()
+        {
+            eprintln!("p1mplayer: could not set application id: {e}");
+        }
+    }
+
     // Load persisted state. The full library is restored instantly from disk; we
     // refresh it from the saved folders in the background after the window opens.
     let state = store::load();
