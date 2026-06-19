@@ -1,0 +1,580 @@
+import { ScrollView, ListView, Slider, LineEdit } from "std-widgets.slint";
+
+export struct TrackRow {
+    id: int,
+    title: string,
+    artist: string,
+    album: string,
+    duration: string,
+    cover: image,
+    has-cover: bool,
+}
+
+export struct PlaylistRow {
+    id: int,
+    name: string,
+    count: int,
+}
+
+// ---- Theme (Gruvbox dark by default; recolored at runtime from cover art) ----
+export global Theme {
+    in-out property <color> bg: #282828;          // dark0   — main background
+    in-out property <color> bg-alt: #32302f;       // dark0-soft — player bar
+    in-out property <color> sidebar: #1d2021;       // dark0-hard — darkest panel
+    in-out property <color> card: #3c3836;          // dark1   — cover placeholder
+    in-out property <color> accent: #fe8019;        // bright orange — signature Gruvbox accent
+    in-out property <color> accent-soft: #5e3e24;   // muted orange tint for selected/idle backgrounds
+    in-out property <color> text: #ebdbb2;          // light1  — primary text
+    in-out property <color> text-dim: #928374;      // gray    — secondary text
+    in-out property <color> hover: #504945;         // dark2   — row/button hover
+    out property <length> radius: 12px;
+}
+
+// A small flat icon-ish button (text glyph based, no external assets)
+component IconButton inherits Rectangle {
+    in property <string> glyph;
+    in property <length> size: 20px;
+    in property <bool> active: false;
+    callback clicked;
+    width: 40px;
+    height: 40px;
+    border-radius: self.width / 2;
+    background: touch.has-hover ? Theme.hover : transparent;
+    animate background { duration: 120ms; }
+    Text {
+        text: glyph;
+        font-size: size;
+        color: active ? Theme.accent : Theme.text;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    touch := TouchArea {
+        clicked => { root.clicked(); }
+    }
+}
+
+component SidebarItem inherits Rectangle {
+    in property <string> label;
+    in property <string> glyph;
+    in property <bool> selected: false;
+    callback clicked;
+    height: 40px;
+    border-radius: 8px;
+    background: selected ? Theme.accent-soft : (touch.has-hover ? Theme.hover : transparent);
+    animate background { duration: 100ms; }
+    HorizontalLayout {
+        padding-left: 12px;
+        padding-right: 12px;
+        spacing: 10px;
+        alignment: start;
+        Text { text: glyph; font-size: 16px; color: selected ? Theme.accent : Theme.text-dim; vertical-alignment: center; }
+        Text { text: label; font-size: 14px; color: Theme.text; vertical-alignment: center; }
+    }
+    touch := TouchArea { clicked => { root.clicked(); } }
+}
+
+component CoverImage inherits Rectangle {
+    in property <image> source;
+    in property <bool> has-cover;
+    in property <length> corner: 8px;
+    border-radius: corner;
+    clip: true;
+    background: Theme.card;
+    if !has-cover : Text {
+        text: "♫";
+        font-size: root.height / 2.5;
+        color: Theme.text-dim;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+    if has-cover : Image {
+        source: root.source;
+        width: 100%;
+        height: 100%;
+        image-fit: cover;
+    }
+}
+
+component TrackListRow inherits Rectangle {
+    in property <TrackRow> track;
+    in property <bool> is-current: false;
+    callback play();
+    callback add-to-queue();
+    callback add-to-playlist();
+    // Fired on right-click, with the click position local to this row, so a
+    // wrapping ContextMenuArea can be shown at the cursor.
+    callback context-menu(Point);
+    height: 56px;
+    border-radius: 8px;
+    background: touch.has-hover ? Theme.hover : transparent;
+    HorizontalLayout {
+        padding: 8px;
+        spacing: 12px;
+        CoverImage {
+            width: 40px; height: 40px;
+            source: track.cover; has-cover: track.has-cover;
+        }
+        VerticalLayout {
+            alignment: center;
+            Text {
+                text: track.title;
+                font-size: 14px;
+                font-weight: is-current ? 800 : 500;
+                color: is-current ? Theme.accent : Theme.text;
+                overflow: elide;
+            }
+            Text { text: track.artist + (track.album != "" ? " • " + track.album : ""); font-size: 12px; color: Theme.text-dim; overflow: elide; }
+        }
+        Rectangle { } // spacer
+        // hover actions
+        HorizontalLayout {
+            spacing: 2px;
+            alignment: end;
+            vertical-stretch: 0;
+            if touch.has-hover : IconButton {
+                glyph: "＋"; size: 16px;
+                clicked => { root.add-to-playlist(); }
+            }
+            if touch.has-hover : IconButton {
+                glyph: "≡"; size: 16px;
+                clicked => { root.add-to-queue(); }
+            }
+        }
+        Text {
+            text: track.duration;
+            font-size: 12px;
+            color: Theme.text-dim;
+            vertical-alignment: center;
+            width: 44px;
+            horizontal-alignment: right;
+        }
+    }
+    touch := TouchArea {
+        // double click to play; right click opens the context menu
+        clicked => { }
+        double-clicked => { root.play(); }
+        pointer-event(e) => {
+            if (e.button == PointerEventButton.right && e.kind == PointerEventKind.down) {
+                root.context-menu({ x: self.mouse-x, y: self.mouse-y });
+            }
+        }
+    }
+}
+
+// A track row plus its right-click context menu. The inner TouchArea grabs
+// right-clicks, so the menu is shown manually via `menu.show(...)` from the
+// row's `context-menu` callback rather than relying on auto-trigger.
+component TrackMenuRow inherits Rectangle {
+    in property <TrackRow> track;
+    in property <bool> is-current: false;
+    in property <[PlaylistRow]> playlists;
+    callback play();
+    callback add-to-queue();
+    callback add-to-playlist();          // hover "＋" (adds to selected/last playlist)
+    callback add-to-playlist-id(int);    // context menu: chosen playlist id
+    callback remove-from-queue();
+    callback delete-file();
+
+    height: 56px;
+
+    menu := ContextMenuArea {
+        Menu {
+            MenuItem {
+                title: "Add to queue";
+                activated => { root.add-to-queue(); }
+            }
+            Menu {
+                title: "Add to playlist";
+                for pl in root.playlists : MenuItem {
+                    title: pl.name;
+                    activated => { root.add-to-playlist-id(pl.id); }
+                }
+                if root.playlists.length == 0 : MenuItem {
+                    title: "No playlists yet";
+                    enabled: false;
+                }
+            }
+            MenuSeparator { }
+            MenuItem {
+                title: "Remove from queue";
+                activated => { root.remove-from-queue(); }
+            }
+            MenuItem {
+                title: "Delete file…";
+                activated => { root.delete-file(); }
+            }
+        }
+
+        TrackListRow {
+            width: 100%;
+            height: 100%;
+            track: root.track;
+            is-current: root.is-current;
+            play => { root.play(); }
+            add-to-queue => { root.add-to-queue(); }
+            add-to-playlist => { root.add-to-playlist(); }
+            context-menu(p) => { menu.show(p); }
+        }
+    }
+}
+
+export component MainWindow inherits Window {
+    title: "p1mplayer";
+    min-width: 620px;
+    min-height: 400px;
+    preferred-width: 1100px;
+    preferred-height: 700px;
+    background: Theme.bg;
+    default-font-size: 14px;
+
+    // ---- library / playlists / queue data ----
+    in property <[TrackRow]> tracks;          // currently shown list (library or playlist)
+    in property <[TrackRow]> queue;           // current play queue
+    in property <[PlaylistRow]> playlists;
+    in property <string> view-title: "Library";
+    in property <int> active-view: 0;         // 0 = library, 1 = queue, 2 = playlist
+    in property <int> selected-playlist: -1;
+    in property <int> current-track-id: -1;   // library index currently playing (library/playlist highlight)
+    in property <int> current-queue-pos: -1;  // queue position currently playing (queue highlight)
+    in property <bool> scanning: false;       // a background folder scan is running
+    in-out property <string> search-text;     // current search query (two-way bound to the box)
+
+    // ---- now playing ----
+    in property <string> now-title: "Nothing playing";
+    in property <string> now-artist: "";
+    in property <image> now-cover;
+    in property <bool> now-has-cover: false;
+    in property <bool> playing: false;
+    in property <float> progress: 0.0;        // 0..1
+    in property <string> position-text: "0:00";
+    in property <string> duration-text: "0:00";
+    in property <int> repeat-mode: 0;         // 0 off, 1 one, 2 all
+    in property <bool> shuffle: false;
+    in property <float> volume: 1.0;          // 0..1
+
+    // ---- callbacks ----
+    callback add-folder();
+    callback search(string);
+    callback show-library();
+    callback show-queue();
+    callback select-playlist(int);
+    callback new-playlist(string);
+    callback play-track(int);                 // id within current `tracks`
+    callback queue-track(int);
+    callback add-track-to-playlist(int);      // opens picker, here: add to selected playlist
+    callback add-track-to-playlist-id(int, int); // (track id, playlist id) from context menu
+    callback remove-track-from-queue(int);    // remove a track (by library id) from the queue
+    callback delete-track-file(int);          // delete a track's file from disk (confirmed)
+    callback play-queue-pos(int);
+    callback remove-queue-pos(int);
+    callback play-pause();
+    callback next-track();
+    callback prev-track();
+    callback seek-forward();
+    callback seek-back();
+    callback seek-to(float);
+    callback toggle-shuffle();
+    callback cycle-repeat();
+    callback set-volume(float);
+
+    HorizontalLayout {
+        // ===================== SIDEBAR =====================
+        Rectangle {
+            width: 240px;
+            background: Theme.sidebar;
+            VerticalLayout {
+                padding: 16px;
+                spacing: 6px;
+
+                Text {
+                    text: "p1mplayer";
+                    font-size: 20px;
+                    font-weight: 900;
+                    color: Theme.text;
+                    height: 44px;
+                    vertical-alignment: center;
+                }
+
+                SidebarItem {
+                    label: "Library"; glyph: "♬";
+                    selected: active-view == 0;
+                    clicked => { root.show-library(); }
+                }
+                SidebarItem {
+                    label: "Queue"; glyph: "≣";
+                    selected: active-view == 1;
+                    clicked => { root.show-queue(); }
+                }
+
+                Rectangle { height: 12px; }
+                HorizontalLayout {
+                    alignment: space-between;
+                    Text { text: "PLAYLISTS"; font-size: 11px; font-weight: 800; color: Theme.text-dim; vertical-alignment: center; }
+                    IconButton {
+                        glyph: "＋"; size: 16px;
+                        clicked => { newpl-popup.show(); }
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    VerticalLayout {
+                        spacing: 4px;
+                        for pl[i] in playlists : SidebarItem {
+                            label: pl.name + "  (" + pl.count + ")";
+                            glyph: "♪";
+                            selected: active-view == 2 && selected-playlist == pl.id;
+                            clicked => { root.select-playlist(pl.id); }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    height: 44px;
+                    border-radius: 10px;
+                    background: load-touch.has-hover ? Theme.accent : Theme.accent-soft;
+                    animate background { duration: 120ms; }
+                    Text { text: "＋  Add folder"; color: Theme.text; font-weight: 700; horizontal-alignment: center; vertical-alignment: center; }
+                    load-touch := TouchArea { clicked => { root.add-folder(); } }
+                }
+            }
+        }
+
+        // ===================== MAIN =====================
+        VerticalLayout {
+            // content
+            Rectangle {
+                vertical-stretch: 1;
+                background: Theme.bg;
+                VerticalLayout {
+                    padding: 24px;
+                    spacing: 14px;
+                    HorizontalLayout {
+                        spacing: 12px;
+                        Text {
+                            text: view-title;
+                            font-size: 26px;
+                            font-weight: 900;
+                            color: Theme.text;
+                            vertical-alignment: center;
+                            horizontal-stretch: 0;
+                        }
+                        if scanning : Rectangle {
+                            height: 28px;
+                            horizontal-stretch: 0;
+                            border-radius: 14px;
+                            background: Theme.accent-soft;
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                Text {
+                                    text: "Scanning…";
+                                    color: Theme.accent;
+                                    font-size: 12px;
+                                    font-weight: 700;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                        Rectangle { horizontal-stretch: 1; } // spacer pushes search to the right
+                        // Search box — filters the current library / playlist list as you type.
+                        if active-view != 1 : LineEdit {
+                            max-width: 280px;
+                            horizontal-stretch: 0;
+                            placeholder-text: "Search title, artist, album…";
+                            text <=> root.search-text;
+                            edited(txt) => { root.search(txt); }
+                        }
+                    }
+
+                    // ---- QUEUE VIEW ---- (ListView virtualizes: only visible rows exist)
+                    if active-view == 1 : Rectangle {
+                        vertical-stretch: 1;
+                        if queue.length > 0 : ListView {
+                            for t[i] in queue : TrackMenuRow {
+                                height: 56px;
+                                track: t;
+                                is-current: i == current-queue-pos;
+                                playlists: root.playlists;
+                                play => { root.play-queue-pos(i); }
+                                add-to-queue => { root.queue-track(t.id); }
+                                add-to-playlist => { root.add-track-to-playlist(t.id); }
+                                add-to-playlist-id(plid) => { root.add-track-to-playlist-id(t.id, plid); }
+                                remove-from-queue => { root.remove-queue-pos(i); }
+                                delete-file => { root.delete-track-file(t.id); }
+                            }
+                        }
+                        if queue.length == 0 : Text {
+                            text: "Queue is empty. Play something from your library.";
+                            color: Theme.text-dim; font-size: 14px;
+                            x: 0; y: 0;
+                        }
+                    }
+
+                    // ---- LIBRARY / PLAYLIST VIEW ----
+                    if active-view != 1 : Rectangle {
+                        vertical-stretch: 1;
+                        if tracks.length > 0 : ListView {
+                            for t[i] in tracks : TrackMenuRow {
+                                height: 56px;
+                                track: t;
+                                is-current: t.id == current-track-id;
+                                playlists: root.playlists;
+                                play => { root.play-track(t.id); }
+                                add-to-queue => { root.queue-track(t.id); }
+                                add-to-playlist => { root.add-track-to-playlist(t.id); }
+                                add-to-playlist-id(plid) => { root.add-track-to-playlist-id(t.id, plid); }
+                                remove-from-queue => { root.remove-track-from-queue(t.id); }
+                                delete-file => { root.delete-track-file(t.id); }
+                            }
+                        }
+                        if tracks.length == 0 : Text {
+                            text: "No tracks yet. Click \"Add folder\" to load music.";
+                            color: Theme.text-dim; font-size: 14px;
+                            x: 0; y: 0;
+                        }
+                    }
+                }
+            }
+
+            // ===================== PLAYER BAR =====================
+            Rectangle {
+                height: 92px;
+                background: Theme.bg-alt;
+                HorizontalLayout {
+                    padding: 16px;
+                    spacing: 16px;
+
+                    // now playing info
+                    HorizontalLayout {
+                        max-width: 280px;
+                        spacing: 12px;
+                        CoverImage {
+                            width: 58px; height: 58px;
+                            source: now-cover; has-cover: now-has-cover;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Text { text: now-title; font-size: 14px; font-weight: 700; color: Theme.text; overflow: elide; }
+                            Text { text: now-artist; font-size: 12px; color: Theme.text-dim; overflow: elide; }
+                        }
+                    }
+
+                    // transport + progress
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        spacing: 6px;
+                        HorizontalLayout {
+                            alignment: center;
+                            spacing: 4px;
+                            IconButton {
+                                glyph: "⤨"; active: shuffle;
+                                clicked => { root.toggle-shuffle(); }
+                            }
+                            IconButton {
+                                glyph: "⏮"; clicked => { root.prev-track(); }
+                            }
+                            IconButton {
+                                glyph: "⏪"; size: 16px;
+                                clicked => { root.seek-back(); }
+                            }
+                            Rectangle {
+                                width: 48px; height: 48px;
+                                border-radius: 24px;
+                                background: pp-touch.has-hover ? Theme.accent : Theme.accent-soft;
+                                animate background { duration: 120ms; }
+                                Text {
+                                    text: playing ? "⏸" : "▶";
+                                    font-size: 20px;
+                                    color: Theme.text;
+                                    horizontal-alignment: center;
+                                    vertical-alignment: center;
+                                }
+                                pp-touch := TouchArea { clicked => { root.play-pause(); } }
+                            }
+                            IconButton {
+                                glyph: "⏩"; size: 16px;
+                                clicked => { root.seek-forward(); }
+                            }
+                            IconButton {
+                                glyph: "⏭"; clicked => { root.next-track(); }
+                            }
+                            IconButton {
+                                glyph: repeat-mode == 1 ? "⟳¹" : "⟳";
+                                active: repeat-mode != 0;
+                                clicked => { root.cycle-repeat(); }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 10px;
+                            Text { text: position-text; font-size: 11px; color: Theme.text-dim; vertical-alignment: center; width: 38px; horizontal-alignment: right; }
+                            Slider {
+                                horizontal-stretch: 1;
+                                minimum: 0; maximum: 1;
+                                value: progress;
+                                changed(v) => { root.seek-to(v); }
+                            }
+                            Text { text: duration-text; font-size: 11px; color: Theme.text-dim; vertical-alignment: center; width: 38px; }
+                        }
+                    }
+
+                    // volume
+                    HorizontalLayout {
+                        max-width: 160px;
+                        spacing: 8px;
+                        Text { text: "🔊"; font-size: 16px; vertical-alignment: center; }
+                        Slider {
+                            horizontal-stretch: 1;
+                            minimum: 0; maximum: 1;
+                            value: volume;
+                            changed(v) => { root.set-volume(v); }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ---- New playlist popup ----
+    newpl-popup := PopupWindow {
+        // Default `close-on-click` dismisses the popup on any click *inside* it too,
+        // which closes it the instant you click the text field. Only auto-close when
+        // the user clicks outside so the input and Create button stay usable.
+        close-policy: close-on-click-outside;
+        x: 16px; y: 120px;
+        width: 220px;
+        Rectangle {
+            background: Theme.card;
+            border-radius: 10px;
+            border-width: 1px;
+            border-color: Theme.hover;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 8px;
+                Text { text: "New playlist"; font-weight: 700; color: Theme.text; }
+                npl-input := LineEdit {
+                    placeholder-text: "Name…";
+                    accepted(txt) => {
+                        root.new-playlist(txt);
+                        npl-input.text = "";
+                        newpl-popup.close();
+                    }
+                }
+                Rectangle {
+                    height: 34px;
+                    border-radius: 8px;
+                    background: ok-touch.has-hover ? Theme.accent : Theme.accent-soft;
+                    Text { text: "Create"; color: Theme.text; horizontal-alignment: center; vertical-alignment: center; }
+                    ok-touch := TouchArea {
+                        clicked => {
+                            root.new-playlist(npl-input.text);
+                            npl-input.text = "";
+                            newpl-popup.close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
