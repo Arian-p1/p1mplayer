@@ -238,6 +238,7 @@ export component MainWindow inherits Window {
     in property <int> current-track-id: -1;   // library index currently playing (library/playlist highlight)
     in property <int> current-queue-pos: -1;  // queue position currently playing (queue highlight)
     in property <bool> scanning: false;       // a background folder scan is running
+    in property <bool> hide-duplicates: false; // collapse content duplicates in the library
     in-out property <string> search-text;     // current search query (two-way bound to the box)
 
     // ---- now playing ----
@@ -276,6 +277,7 @@ export component MainWindow inherits Window {
     callback seek-to(float);
     callback toggle-shuffle();
     callback cycle-repeat();
+    callback toggle-hide-duplicates();
     callback set-volume(float);
 
     HorizontalLayout {
@@ -378,6 +380,13 @@ export component MainWindow inherits Window {
                             }
                         }
                         Rectangle { horizontal-stretch: 1; } // spacer pushes search to the right
+                        // Toggle: hide content duplicates (the same song that exists
+                        // as more than one file). Library view only.
+                        if active-view == 0 : IconButton {
+                            glyph: "⧉";
+                            active: hide-duplicates;
+                            clicked => { root.toggle-hide-duplicates(); }
+                        }
                         // Search box — filters the current library / playlist list as you type.
                         if active-view != 1 : LineEdit {
                             max-width: 280px;

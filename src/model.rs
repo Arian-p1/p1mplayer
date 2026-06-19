@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Serde helpers that persist filesystem paths losslessly, even when a path is not
 /// valid UTF-8 (e.g. a Persian filename stored in a legacy code page). Valid UTF-8
@@ -89,6 +89,29 @@ impl Track {
     pub fn duration_label(&self) -> String {
         fmt_secs(self.duration_secs)
     }
+
+    /// Identity used to detect *content* duplicates: the same song that happens to
+    /// exist as two separate files (e.g. copied into two folders). Normalised so
+    /// case/whitespace differences don't defeat the match. This is intentionally
+    /// distinct from file identity (`canonical_key`): two byte-identical copies in
+    /// different locations are different files but the same song.
+    pub fn content_key(&self) -> (String, String, String, u64) {
+        (
+            self.title.trim().to_lowercase(),
+            self.artist.trim().to_lowercase(),
+            self.album.trim().to_lowercase(),
+            self.duration_secs,
+        )
+    }
+}
+
+/// A stable identity for a file on disk. `canonicalize` resolves symlinks, `.`/`..`,
+/// and duplicate scan roots to a single real path, so the same underlying file is
+/// recognised as one entry regardless of which path it was reached through. Falls
+/// back to the path as-is when it can't be resolved (e.g. the file no longer exists),
+/// which still dedups byte-identical paths.
+pub fn canonical_key(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Format a number of seconds as `m:ss` (or `h:mm:ss` for long tracks).
@@ -144,6 +167,16 @@ pub struct AppState {
     pub volume: f32,
     pub repeat: RepeatMode,
     pub shuffle: bool,
+    /// When true, the library view collapses content duplicates (the same song
+    /// existing as more than one file), showing each song only once.
+    #[serde(default = "default_hide_duplicates")]
+    pub hide_duplicates: bool,
+}
+
+/// Hide content duplicates by default: a freshly scanned library that contains the
+/// same song twice should look tidy out of the box. Users can toggle it off.
+fn default_hide_duplicates() -> bool {
+    true
 }
 
 impl Default for AppState {
@@ -155,6 +188,7 @@ impl Default for AppState {
             volume: 1.0,
             repeat: RepeatMode::Off,
             shuffle: false,
+            hide_duplicates: default_hide_duplicates(),
         }
     }
 }
@@ -163,6 +197,18 @@ impl AppState {
     /// Find the library index of a track by path.
     pub fn index_of_path(&self, path: &std::path::Path) -> Option<usize> {
         self.library.iter().position(|t| t.path == path)
+    }
+
+    /// Drop library entries that resolve to the *same file on disk*. These are not
+    /// real duplicates the user created — they come from scanning a file through more
+    /// than one path (a followed symlink, overlapping scan folders, or `.`/`..` in a
+    /// path). The first entry in each group is kept, preserving order. Returns how
+    /// many entries were removed.
+    pub fn dedup_library_files(&mut self) -> usize {
+        let before = self.library.len();
+        let mut seen = std::collections::HashSet::new();
+        self.library.retain(|t| seen.insert(canonical_key(&t.path)));
+        before - self.library.len()
     }
 }
 
@@ -190,6 +236,57 @@ mod tests {
         assert!(json.contains("/music/"));
         let back: Track = serde_json::from_str(&json).unwrap();
         assert_eq!(back.path, t.path);
+    }
+
+    #[test]
+    fn content_key_ignores_case_and_whitespace() {
+        let mut a = sample_track(PathBuf::from("/music/a.mp3"));
+        a.title = "  Hello World ".into();
+        a.artist = "Some ARTIST".into();
+        a.album = "An Album".into();
+        a.duration_secs = 200;
+
+        let mut b = sample_track(PathBuf::from("/elsewhere/b.mp3"));
+        b.title = "hello world".into();
+        b.artist = "some artist".into();
+        b.album = "an album".into();
+        b.duration_secs = 200;
+
+        assert_eq!(a.content_key(), b.content_key(), "same song, different files");
+
+        // A different duration is treated as a different song.
+        let mut c = b.clone();
+        c.duration_secs = 201;
+        assert_ne!(a.content_key(), c.content_key());
+    }
+
+    // The reported bug: the *same file* scanned through two different paths (e.g. a
+    // followed symlink or overlapping scan folders) produced two library entries.
+    // Identical paths must collapse to a single entry; genuinely different paths to
+    // missing files are left alone.
+    #[test]
+    fn dedup_library_files_collapses_identical_paths() {
+        let mut state = AppState::default();
+        let p = PathBuf::from("/music/song.mp3");
+        state.library.push(sample_track(p.clone()));
+        state.library.push(sample_track(p.clone()));
+        state.library.push(sample_track(PathBuf::from("/music/other.mp3")));
+
+        let removed = state.dedup_library_files();
+        assert_eq!(removed, 1);
+        assert_eq!(state.library.len(), 2);
+        assert_eq!(state.library[0].path, p);
+        assert_eq!(state.library[1].path, PathBuf::from("/music/other.mp3"));
+    }
+
+    #[test]
+    fn hide_duplicates_defaults_on_and_survives_old_state() {
+        // Fresh default has the feature enabled.
+        assert!(AppState::default().hide_duplicates);
+        // State serialized before the field existed still loads (serde default).
+        let json = r#"{"library":[],"playlists":[],"volume":1.0,"repeat":"Off","shuffle":false}"#;
+        let back: AppState = serde_json::from_str(json).unwrap();
+        assert!(back.hide_duplicates);
     }
 
     // Previously, a non-UTF-8 path made `serde_json::to_string` fail, which broke

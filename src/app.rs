@@ -1,11 +1,11 @@
 use crate::audio::AudioPlayer;
 use crate::media::{self, ControlEvent, Media, SeekDirection};
-use crate::model::{fmt_secs, AppState, Playlist, Track};
+use crate::model::{canonical_key, fmt_secs, AppState, Playlist, Track};
 use crate::palette::{self, ThemeColors};
 use crate::queue::Queue;
 use crate::{library, store};
 use slint::{ModelRc, VecModel};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
 use std::time::Duration;
@@ -31,6 +31,10 @@ pub struct Controller {
     playing_intent: bool,
     /// Receives streamed results from an in-progress background folder scan.
     scan_rx: Option<Receiver<ScanMsg>>,
+    /// Canonical file identities already in the library, maintained for the duration
+    /// of a scan so the same file reached via a different path (symlink, overlapping
+    /// scan folder, `.`/`..`) is merged once instead of duplicated.
+    scan_keys: HashSet<PathBuf>,
     /// Decoded cover thumbnails, keyed by thumbnail path, so each is read once.
     cover_cache: HashMap<PathBuf, slint::Image>,
     /// Tracks added by the in-progress scan so far (drives the completion log).
@@ -70,6 +74,14 @@ enum ScanMsg {
 
 impl Controller {
     pub fn new(state: AppState) -> Self {
+        let mut state = state;
+        // Clean up any same-file duplicates left in a library saved by an older build
+        // (before scans deduped by canonical path). This only removes entries that
+        // point to the very same file on disk, never genuine separate copies.
+        let removed = state.dedup_library_files();
+        if removed > 0 {
+            eprintln!("p1mplayer: removed {removed} duplicate library entr(ies)");
+        }
         let mut player = match AudioPlayer::new() {
             Ok(p) => Some(p),
             Err(e) => {
@@ -95,6 +107,7 @@ impl Controller {
             visible: Vec::new(),
             playing_intent: false,
             scan_rx: None,
+            scan_keys: HashSet::new(),
             cover_cache: HashMap::new(),
             scan_added: 0,
             search_query: String::new(),
@@ -130,6 +143,14 @@ impl Controller {
         // separately and keyed by position, so it is left untouched).
         if !self.search_query.is_empty() {
             indices.retain(|&i| self.matches_query(i));
+        }
+        // Optionally hide content duplicates (the same song that exists as more than
+        // one file). Only in the library — playlists are user-curated, so a track
+        // deliberately added twice there is left alone. The first occurrence in the
+        // current (sorted) order is the one kept.
+        if self.state.hide_duplicates && matches!(self.view, View::Library) {
+            let mut seen = HashSet::new();
+            indices.retain(|&i| seen.insert(self.state.library[i].content_key()));
         }
         (indices, title)
     }
@@ -199,6 +220,7 @@ impl Controller {
             View::Playlist(pi) => pi as i32,
             _ => -1,
         });
+        ui.set_hide_duplicates(self.state.hide_duplicates);
 
         // playlists sidebar
         let pls: Vec<PlaylistRow> = self
@@ -583,11 +605,13 @@ impl Controller {
         }
 
         // Merge any freshly scanned tracks, skipping ones we already know about.
-        // We append (cheap) during streaming and sort only once the scan finishes,
-        // so a large scan doesn't re-sort the whole library on every tick.
+        // Dedup is by canonical file identity (not raw path): a file reached through a
+        // symlink or an overlapping scan folder resolves to the same key and is added
+        // once. We append (cheap) during streaming and sort only once the scan
+        // finishes, so a large scan doesn't re-sort the whole library on every tick.
         let mut changed = false;
         for t in new_tracks {
-            if self.state.index_of_path(&t.path).is_none() {
+            if self.scan_keys.insert(canonical_key(&t.path)) {
                 self.state.library.push(t);
                 self.scan_added += 1;
                 changed = true;
@@ -596,6 +620,7 @@ impl Controller {
 
         if let Some(dir) = done {
             ui.set_scanning(false);
+            self.scan_keys = HashSet::new();
             if let Some(dir) = dir {
                 if !self.state.scanned_dirs.contains(&dir) {
                     self.state.scanned_dirs.push(dir);
@@ -616,6 +641,7 @@ impl Controller {
             if disconnected {
                 ui.set_scanning(false);
                 self.scan_added = 0;
+                self.scan_keys = HashSet::new();
             }
         }
     }
@@ -633,6 +659,13 @@ impl Controller {
     pub fn cycle_repeat(&mut self, ui: &MainWindow) {
         self.state.repeat = self.state.repeat.cycle();
         self.refresh_now_playing(ui);
+        self.save();
+    }
+
+    /// Toggle whether content duplicates are hidden in the library view.
+    pub fn toggle_hide_duplicates(&mut self, ui: &MainWindow) {
+        self.state.hide_duplicates = !self.state.hide_duplicates;
+        self.refresh_lists(ui);
         self.save();
     }
 
@@ -700,6 +733,7 @@ impl Controller {
             let _ = tx.send(ScanMsg::Done(Some(scan_dir)));
         });
         self.scan_added = 0;
+        self.scan_keys = self.state.library.iter().map(|t| canonical_key(&t.path)).collect();
         self.scan_rx = Some(rx);
         ui.set_scanning(true);
     }
@@ -731,6 +765,7 @@ impl Controller {
             let _ = tx.send(ScanMsg::Done(None));
         });
         self.scan_added = 0;
+        self.scan_keys = self.state.library.iter().map(|t| canonical_key(&t.path)).collect();
         self.scan_rx = Some(rx);
         ui.set_scanning(true);
     }

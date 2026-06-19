@@ -99,6 +99,7 @@ fn wire_callbacks(ui: &MainWindow, controller: &Rc<RefCell<Controller>>) {
     on!(on_seek_back, seek_back);
     on!(on_toggle_shuffle, toggle_shuffle);
     on!(on_cycle_repeat, cycle_repeat);
+    on!(on_toggle_hide_duplicates, toggle_hide_duplicates);
 
     on!(on_select_playlist, select_playlist, id => id as usize);
     on!(on_play_track, play_track, id => id as usize);
