@@ -247,7 +247,7 @@ export component MainWindow inherits Window {
     in property <image> now-cover;
     in property <bool> now-has-cover: false;
     in property <bool> playing: false;
-    in property <float> progress: 0.0;        // 0..1
+    in-out property <float> progress: 0.0;    // 0..1
     in property <string> position-text: "0:00";
     in property <string> duration-text: "0:00";
     in property <int> repeat-mode: 0;         // 0 off, 1 one, 2 all
@@ -522,7 +522,7 @@ export component MainWindow inherits Window {
                             Slider {
                                 horizontal-stretch: 1;
                                 minimum: 0; maximum: 1;
-                                value: progress;
+                                value <=> root.progress;
                                 changed(v) => { root.seek-to(v); }
                             }
                             Text { text: duration-text; font-size: 11px; color: Theme.text-dim; vertical-alignment: center; width: 38px; }
